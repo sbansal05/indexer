@@ -76,13 +76,73 @@ CREATE TABLE indexer_watermark (
 );
 ```
 
-## Known limitations
+## Known limitations, stated honestly
 
 - Replay recovers from a brief disconnect, not an extended outage — Yellowstone's replay buffer covers roughly the last 3,000 slots, about 20 minutes, not unlimited history.
 - `mint` and `decimals` are nullable because the legacy `Transfer` instruction doesn't carry a mint account at all — that's a property of the instruction format, not a gap in the indexer.
 - No block timestamps. A real `block_time` requires a second subscription (`SubscribeUpdateBlockMeta`) joined on slot — out of scope for a narrow build; `received_at` (wall-clock at insert time) is stored instead.
 - Multisig transfers aren't captured distinctly — both account structs carry a `multisig_signers: Vec<Pubkey>` field for SPL Token's multisig-authority feature, out of scope for this narrow build; only the single `owner` is stored as `authority_pubkey`.
 - Block reconstruction has a documented bug on non-leader validators like this local one (zero entry counts) — doesn't affect this project, since only transaction-level Token instructions are used, not full block metadata.
+
+## Running locally
+
+Needs: Rust/Cargo, the Agave CLI (`agave-install`), Node.js/npm, and PostgreSQL, all installed and on `PATH`.
+
+**1. Build the Geyser plugin** — this lives outside this repo, in its own clone:
+```bash
+git clone https://github.com/rpcpool/yellowstone-grpc.git ~/tools/yellowstone-grpc
+cd ~/tools/yellowstone-grpc
+cargo build --release -p yellowstone-grpc-geyser
+```
+
+**2. Match the Agave version the plugin was actually built against** — check the plugin's `Cargo.lock` for the pinned `agave-geyser-plugin-interface` version (this project needed `4.2.2` specifically; a mismatch here causes a cryptic pubkey-parsing panic on startup, not a helpful error):
+```bash
+agave-install init 4.2.2 --no-modify-path
+```
+
+**3. Point the config at your build** — `validator-config/geyser-config.json` is already in this repo; edit its `libpath` field to the absolute path of the `.so` you just built (e.g. `~/tools/yellowstone-grpc/target/release/libyellowstone_grpc_geyser.so`). Validate it before trusting it:
+```bash
+cd ~/tools/yellowstone-grpc
+cargo run --bin config-check -- --config /path/to/this/repo/validator-config/geyser-config.json
+```
+
+**4. Set up Postgres** — create a role and database, then run the migration:
+```bash
+sudo service postgresql start
+sudo -u postgres psql -c "CREATE USER indexer WITH PASSWORD 'devpassword';"
+sudo -u postgres psql -c "CREATE DATABASE indexer_db OWNER indexer;"
+PGPASSWORD=devpassword psql -h 127.0.0.1 -U indexer -d indexer_db -f migrations/0001_init.sql
+```
+
+**5. Create `.env`** in this repo's root (see `.env.example`):
+```bash
+echo 'DATABASE_URL=postgres://indexer:devpassword@127.0.0.1:5432/indexer_db?sslmode=disable' > .env
+```
+
+**6. Start the local validator with the plugin loaded** — leave this running in its own terminal:
+```bash
+solana-test-validator \
+  --ledger ~/ledger-local \
+  --geyser-plugin-config /path/to/this/repo/validator-config/geyser-config.json \
+  --rpc-port 8899 \
+  --dynamic-port-range 8000-8026
+```
+
+**7. Start the traffic generator** — in a second terminal, also left running:
+```bash
+cd scripts/traffic-gen
+npm install
+npx tsx index.ts
+```
+
+**8. Build and run the indexer** — in a third terminal:
+```bash
+cargo build
+cargo run
+```
+
+You should see leveled log output (`INFO`, `WARN`) as it connects, subscribes, and starts decoding real transfers from the traffic generator. To see the resume behavior for yourself: let it run for a bit, `Ctrl+C` it, then `cargo run` again — the first line should read `Watermark on startup: Some(<a real slot>)`, not `None`, and row counts in `token_transfers` keep climbing from where they left off rather than resetting.
+
 
 
 ## Stack
