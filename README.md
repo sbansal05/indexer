@@ -22,7 +22,7 @@ That live connection is the whole value proposition — and also the whole engin
 
 ![Architecture diagram](docs/architecture.png)
 
-## Components, one by one
+## Components
 
 ### 1. Local validator + Geyser plugin
 A single-node, ephemeral, fully local Solana cluster (`agave-test-validator`) with the open-source `yellowstone-grpc-geyser` plugin compiled and loaded via `--geyser-plugin-config`. This is a private simulation — it has no connection to the real public Solana devnet, and the only activity it ever contains is what the traffic generator creates on it. "Devnet" here means "not real money," not "the shared public devnet network."
@@ -35,10 +35,10 @@ The local validator starts with an empty ledger — there's nothing to stream un
 ### 3. Connection module (`grpc.rs`)
 Opens the gRPC channel and builds the `SubscribeRequest`: a `transactions` filter with `account_include` set to the classic Token Program ID, commitment level `Confirmed`. Returns the stream of `SubscribeUpdate` messages. This is the literal phone line everything else depends on.
 
-### 4. Reconnection policy (client config, not hand-written)
+### 4. Reconnection policy (client config)
 `yellowstone-grpc-client` ships its own `ReconnectionPolicy` — automatic reconnect with exponential backoff, on by default, including correct handling of equivocation (a validator briefly producing two versions of the same slot before one finalizes) via blockhash comparison. We configure this rather than write a retry loop ourselves — re-deriving the equivocation handling by hand is easy to get subtly wrong, and there's no reason to when the library already does it correctly. This only covers one failure mode: a transient drop *while the process keeps running*.
 
-### 5. Watermark / crash recovery (`db.rs`) — the actual hard part
+### 5. Watermark / crash recovery (`db.rs`)
 The reconnection policy above does nothing if the process itself dies — a crash, a redeploy, being stopped overnight — because a fresh process has no in-memory state to reconnect from. This module persists `last_committed_slot` to Postgres after every successful write, and reads it back on startup to set `from_slot` on the very first subscribe request of a new process. The library gets you through a hiccup; this is what gets you through a restart.
 
 ### 6. Decode layer (`decode.rs`)
@@ -76,27 +76,6 @@ CREATE TABLE indexer_watermark (
 - `mint` and `decimals` are nullable because the legacy `Transfer` instruction doesn't carry a mint account at all — that's a property of the instruction format, not a gap in the indexer.
 - No block timestamps. A real `block_time` requires a second subscription (`SubscribeUpdateBlockMeta`) joined on slot — out of scope for a narrow build; `received_at` (wall-clock at insert time) is stored instead.
 
-## Tasks to complete
-
-The engineering is done — every item below except the last two is real, working code, proven against live traffic. What's left is a recording and documentation, not logic.
-
-- [x] Compile `yellowstone-grpc-geyser` and confirm `agave-test-validator` starts with it loaded, exposing the gRPC port
-- [x] Write the traffic generator script (mint + looping Transfer/TransferChecked between test keypairs) — confirmed both instruction variants flowing end-to-end through the indexer
-- [x] Write the connection module — channel + `SubscribeRequest` (Token Program filter, `Confirmed` commitment)
-- [x] Reconnection policy configured — `RecoverMissedData`, 200ms/×2/6-retry backoff (~12.6s total budget); previously connect() had zero reconnect wired in at all, now fixed
-- [x] Run the Postgres migration for `token_transfers` and `indexer_watermark`
-- [x] Write the watermark read (on startup) — confirmed working, correctly returns `None` before any writes exist
-- [x] Write the watermark write logic (after each commit) — upsert with a never-move-backward guard, same transaction as the insert
-- [x] Resolve the open question on Shipstern's parser trait input type, then write the decode layer — confirmed working end-to-end against live traffic (both Transfer and TransferChecked decoding correctly)
-- [x] Write the idempotent writer, watermark update in the same transaction — `ON CONFLICT DO NOTHING`, confirmed compiling clean
-- [x] End-to-end test: kill/restart proven — resumed from a real persisted watermark (not None), continued writing correctly, zero errors
-- [ ] Record the kill/resume test as a short clip for the README
-- [ ] Write real "Running locally" instructions once the above actually works
-- [x] Decide: classic Token Program only — confirmed, keeps scope narrow and matches the project's design philosophy throughout
-
-## Status
-
-Fully implemented and working end to end: connect, subscribe, decode, idempotent write, watermark-based resume — all proven against live traffic, including a real kill-and-restart. Remaining: a recorded demo clip and finished "Running locally" instructions.
 
 ## Stack
 
