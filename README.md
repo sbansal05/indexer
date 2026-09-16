@@ -25,9 +25,13 @@ That live connection is the whole value proposition — and also the whole engin
 ## Components
 
 ### 1. Local validator + Geyser plugin
-A single-node, ephemeral, fully local Solana cluster (`agave-test-validator`) with the open-source `yellowstone-grpc-geyser` plugin compiled and loaded via `--geyser-plugin-config`. This is a private simulation — it has no connection to the real public Solana devnet, and the only activity it ever contains is what the traffic generator creates on it. "Devnet" here means "not real money," not "the shared public devnet network."
+A single-node, ephemeral, fully local Solana cluster (`agave-test-validator`) with the open-source `yellowstone-grpc-geyser` plugin compiled and loaded via `--geyser-plugin-config`. Its only activity is whatever the traffic generator creates on it.
 
-It plays the role a hosted provider like QuickNode would play in production, for free, on a laptop — worth being precise, though, about what that role actually is. Every managed Yellowstone provider is **mainnet-only**: Chainstack's docs say so outright, and every QuickNode endpoint example uses `solana-mainnet.quiknode.pro` with no devnet equivalent shown anywhere. There doesn't appear to be a commercial hosted Yellowstone offering for devnet at all — the demand driving this product (trading, MEV, real-money indexing) is a mainnet thing. TrustTrail itself is deployed on devnet, so this project is **not** a claim that it watches TrustTrail's live activity today — the accurate framing is that this is the pipeline TrustTrail's data layer would run on if that lending activity were being tracked on mainnet. The client code doesn't know or care which: it's the standard `yellowstone-grpc-client` crate speaking the standard Dragon's Mouth protocol, unchanged whether pointed at `localhost` or at QuickNode's mainnet endpoint with an `x-token` header added. Known rough edge on the local setup itself: block reconstruction has a documented bug on non-leader validators like this one (zero entry counts) — doesn't affect us, since we only care about transaction-level Token instructions, not full block metadata.
+It's a private simulation, not a connection to the real public Solana devnet — "devnet" here just means "not real money," not "the shared public network."
+
+It plays the role a hosted provider like QuickNode would play in production — but every managed Yellowstone provider turns out to be mainnet-only. Chainstack's docs say so outright, and every QuickNode endpoint example uses `solana-mainnet.quiknode.pro`, with no devnet equivalent shown anywhere. TrustTrail itself is deployed on devnet, so this project isn't a claim that it watches TrustTrail's live activity today. The accurate framing: this is the pipeline TrustTrail's data layer would run on once that lending activity is tracked on mainnet.
+
+The client code itself doesn't know or care which network it's pointed at — it's the standard `yellowstone-grpc-client` crate speaking the standard Dragon's Mouth protocol, unchanged whether the endpoint is `localhost` or QuickNode's mainnet address with an `x-token` header added.
 
 ### 2. Traffic generator (`scripts/traffic-gen/`, TypeScript)
 The local validator starts with an empty ledger — there's nothing to stream until something happens. This is a small, separate script that creates a test mint, funds a handful of keypairs, and loops submitting `Transfer`/`TransferChecked` instructions between them on an interval. It is explicitly a dev fixture, not part of the deliverable, and lives in its own folder so nobody mistakes it for "the indexer."
@@ -36,13 +40,15 @@ The local validator starts with an empty ledger — there's nothing to stream un
 Opens the gRPC channel and builds the `SubscribeRequest`: a `transactions` filter with `account_include` set to the classic Token Program ID, commitment level `Confirmed`. Returns the stream of `SubscribeUpdate` messages. This is the literal phone line everything else depends on.
 
 ### 4. Reconnection policy (client config)
-`yellowstone-grpc-client` ships its own `ReconnectionPolicy` — automatic reconnect with exponential backoff, on by default, including correct handling of equivocation (a validator briefly producing two versions of the same slot before one finalizes) via blockhash comparison. We configure this rather than write a retry loop ourselves — re-deriving the equivocation handling by hand is easy to get subtly wrong, and there's no reason to when the library already does it correctly. This only covers one failure mode: a transient drop *while the process keeps running*.
+`yellowstone-grpc-client` ships its own `ReconnectionPolicy` — automatic reconnect with exponential backoff, on by default, including correct handling of equivocation (a validator briefly producing two versions of the same slot before one finalizes) via blockhash comparison. We configure this rather than write a retry loop ourselves, since re-deriving the equivocation handling by hand is easy to get subtly wrong.
 
-### 5. Watermark / crash recovery (`db.rs`)
+This only covers one failure mode, though: a transient drop *while the process keeps running*.
+
+### 5. Watermark / crash recovery (`db.rs`) 
 The reconnection policy above does nothing if the process itself dies — a crash, a redeploy, being stopped overnight — because a fresh process has no in-memory state to reconnect from. This module persists `last_committed_slot` to Postgres after every successful write, and reads it back on startup to set `from_slot` on the very first subscribe request of a new process. The library gets you through a hiccup; this is what gets you through a restart.
 
 ### 6. Decode layer (`decode.rs`)
-Each raw transaction is turned into a list of `InstructionUpdate` values via `InstructionUpdate::build_from_txn` (a standalone function in `shipstern-core` — no framework `Runtime` required, confirming the hand-rolled architecture was viable). Each one is then handed to Shipstern's `InstructionParser`, and only `Transfer` / `TransferChecked` variants are kept — everything else (mints, burns, approvals) is dropped here. Conceptually the same work as manually deriving Kamino's instruction discriminators in TrustTrail, just for a program where someone has already done the byte-layout work. Both account structs carry a `multisig_signers: Vec<Pubkey>` field for SPL Token's multisig-authority feature — out of scope for this narrow build; only the single `owner` is captured as `authority_pubkey`.
+Each raw transaction is turned into a list of `InstructionUpdate` values via `InstructionUpdate::build_from_txn` — a standalone function in `shipstern-core`, needing no framework `Runtime`, which is what confirmed the hand-rolled architecture was viable. Each one is then handed to Shipstern's `InstructionParser`, keeping only `Transfer` / `TransferChecked` variants — everything else (mints, burns, approvals) is dropped here. Conceptually the same work as manually deriving Kamino's instruction discriminators in TrustTrail, just for a program where someone has already done the byte-layout work.
 
 ### 7. Idempotent writer (`db.rs`)
 `INSERT ... ON CONFLICT (slot, signature, instruction_index) DO NOTHING` into `token_transfers`, in the same transaction as the watermark update. This is what makes replay-after-reconnect safe: seeing the same transfer twice becomes a harmless no-op instead of a duplicate row or a crash.
@@ -70,11 +76,13 @@ CREATE TABLE indexer_watermark (
 );
 ```
 
-## Known limitations, stated honestly
+## Known limitations
 
-- Replay recovers from a brief disconnect, not an extended outage — Yellowstone's replay buffer covers a bounded recent window, not unlimited history.
+- Replay recovers from a brief disconnect, not an extended outage — Yellowstone's replay buffer covers roughly the last 3,000 slots, about 20 minutes, not unlimited history.
 - `mint` and `decimals` are nullable because the legacy `Transfer` instruction doesn't carry a mint account at all — that's a property of the instruction format, not a gap in the indexer.
 - No block timestamps. A real `block_time` requires a second subscription (`SubscribeUpdateBlockMeta`) joined on slot — out of scope for a narrow build; `received_at` (wall-clock at insert time) is stored instead.
+- Multisig transfers aren't captured distinctly — both account structs carry a `multisig_signers: Vec<Pubkey>` field for SPL Token's multisig-authority feature, out of scope for this narrow build; only the single `owner` is stored as `authority_pubkey`.
+- Block reconstruction has a documented bug on non-leader validators like this local one (zero entry counts) — doesn't affect this project, since only transaction-level Token instructions are used, not full block metadata.
 
 
 ## Stack
