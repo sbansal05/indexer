@@ -1,0 +1,23 @@
+# Rust build artifacts — huge, fully regenerable via `cargo build`
+/target
+/indexer/target
+
+# Node.js traffic generator — same idea, `npm install` regenerates it
+scripts/traffic-gen/node_modules/
+
+# solana-test-validator sometimes creates this if run without an
+# explicit --ledger flag from inside the project directory
+test-ledger/
+
+# Environment files and secrets — never commit these, even placeholder
+# ones, since it trains a bad habit
+.env
+.env.local
+
+# Any Solana keypair files, if you ever generate one to disk in this repo
+*.json
+!validator-config/geyser-config.json
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
