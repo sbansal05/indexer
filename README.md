@@ -12,6 +12,25 @@ It's deliberately small. Scope is the point, not a limitation:
 
 ---
 
+**The whole point of this project, in four screenshots:** kill the indexer mid-stream, restart it, and watch it pick up exactly where it left off — zero gaps, zero duplicate rows.
+
+Running fresh, decoding real transfers — the banner correctly reads "Fresh start" right after a clean truncate:
+<img src="docs/demo-1-running.png" width="700">
+<br>
+23 rows before a restart:
+<br><br>
+<img src="docs/demo-2-before-count.png" width="700">
+<br><br>
+Killed and restarted — the banner reads a real slot straight from Postgres, not "from now":
+<br>
+<img src="docs/demo-3-resume.png" width="700">
+<br>
+170 rows after — kept climbing from where it left off, not reset:
+<br>
+<img src="docs/demo-4-after-count.png" width="700">
+
+---
+
 ## The problem this solves, one level down
 
 Solana validators know about every account change and transaction the instant they process it — it's literally what they're doing. Geyser is the hook built into validator software that exposes that internal firehose. Yellowstone is the standard way of putting that firehose on the network as a gRPC stream, so any external program can open a connection and start receiving events live, instead of asking a validator "anything new?" over and over.
@@ -76,7 +95,7 @@ CREATE TABLE indexer_watermark (
 );
 ```
 
-## Known limitations, stated honestly
+## Known limitations
 
 - Replay recovers from a brief disconnect, not an extended outage — Yellowstone's replay buffer covers roughly the last 3,000 slots, about 20 minutes, not unlimited history.
 - `mint` and `decimals` are nullable because the legacy `Transfer` instruction doesn't carry a mint account at all — that's a property of the instruction format, not a gap in the indexer.
@@ -114,7 +133,7 @@ sudo -u postgres psql -c "CREATE DATABASE indexer_db OWNER indexer;"
 PGPASSWORD=devpassword psql -h 127.0.0.1 -U indexer -d indexer_db -f migrations/0001_init.sql
 ```
 
-**5. Create `.env`** in this repo's root (see `.env.example`):
+**5. Create `.env`** in this repo's root (see `.env.example` for the shape):
 ```bash
 echo 'DATABASE_URL=postgres://indexer:devpassword@127.0.0.1:5432/indexer_db?sslmode=disable' > .env
 ```
@@ -142,8 +161,6 @@ cargo run
 ```
 
 You should see leveled log output (`INFO`, `WARN`) as it connects, subscribes, and starts decoding real transfers from the traffic generator. To see the resume behavior for yourself: let it run for a bit, `Ctrl+C` it, then `cargo run` again — the first line should read `Watermark on startup: Some(<a real slot>)`, not `None`, and row counts in `token_transfers` keep climbing from where they left off rather than resetting.
-
-
 
 ## Stack
 
